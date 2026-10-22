@@ -190,10 +190,16 @@ def ingest_webhook(event: dict[str, Any]) -> dict[str, int]:
     statuses = 0
     if event.get("object") != "whatsapp_business_account":
         return {"mensagens_novas": 0, "status_recebidos": 0}
-    for entry in event.get("entry", [])[:100]:
+    entries = event.get("entry", [])
+    if not isinstance(entries, list):
+        return {"mensagens_novas": 0, "status_recebidos": 0}
+    for entry in entries[:100]:
         if not isinstance(entry, dict):
             continue
-        for change in entry.get("changes", [])[:100]:
+        changes = entry.get("changes", [])
+        if not isinstance(changes, list):
+            continue
+        for change in changes[:100]:
             if not isinstance(change, dict) or change.get("field") != "messages":
                 continue
             value = change.get("value", {})
@@ -202,7 +208,10 @@ def ingest_webhook(event: dict[str, Any]) -> dict[str, int]:
             metadata = value.get("metadata", {})
             if not isinstance(metadata, dict) or str(metadata.get("phone_number_id", "")) != settings.phone_number_id:
                 continue
-            for message in value.get("messages", [])[:100]:
+            messages = value.get("messages", [])
+            if not isinstance(messages, list):
+                messages = []
+            for message in messages[:100]:
                 if not isinstance(message, dict):
                     continue
                 msg_id = str(message.get("id", ""))[:256]
@@ -221,7 +230,10 @@ def ingest_webhook(event: dict[str, Any]) -> dict[str, int]:
                     body = ""
                 if store.inbound(msg_id, sender, kind, body[:4096], timestamp):
                     inserted += 1
-            for status in value.get("statuses", [])[:100]:
+            status_items = value.get("statuses", [])
+            if not isinstance(status_items, list):
+                status_items = []
+            for status in status_items[:100]:
                 if not isinstance(status, dict):
                     continue
                 msg_id = str(status.get("id", ""))[:256]
@@ -250,9 +262,13 @@ async def webhook(request: Request) -> Response:
             return PlainTextResponse("corpo excede limite", status_code=413)
     except ValueError:
         return PlainTextResponse("content-length inválido", status_code=400)
-    raw = await request.body()
-    if len(raw) > 512 * 1024:
-        return PlainTextResponse("corpo excede limite", status_code=413)
+    # Streaming com teto efetivo, mesmo se Content-Length for omitido ou falso.
+    chunks = bytearray()
+    async for chunk in request.stream():
+        if len(chunks) + len(chunk) > 512 * 1024:
+            return PlainTextResponse("corpo excede limite", status_code=413)
+        chunks.extend(chunk)
+    raw = bytes(chunks)
     if not valid_signature(raw, request.headers.get("x-hub-signature-256", ""), settings.app_secret):
         return PlainTextResponse("assinatura inválida", status_code=403)
     try:
